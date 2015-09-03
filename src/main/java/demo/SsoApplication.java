@@ -12,14 +12,20 @@ import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.cloud.security.oauth2.sso.EnableOAuth2Sso;
 import org.springframework.cloud.security.oauth2.sso.OAuth2SsoConfigurerAdapter;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.env.StandardEnvironment;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.oauth2.client.OAuth2RestOperations;
+import org.springframework.security.oauth2.provider.OAuth2Authentication;
+import org.springframework.security.oauth2.provider.token.AccessTokenConverter;
+import org.springframework.security.oauth2.provider.token.ResourceServerTokenServices;
+import org.springframework.security.oauth2.provider.token.UserAuthenticationConverter;
 import org.springframework.security.web.csrf.CsrfFilter;
 import org.springframework.security.web.csrf.CsrfToken;
 import org.springframework.security.web.csrf.CsrfTokenRepository;
@@ -30,6 +36,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.filter.OncePerRequestFilter;
 
+import demo.pojo.OIDCAuthentication;
+
 @Configuration
 @ComponentScan
 @EnableAutoConfiguration
@@ -38,9 +46,17 @@ import org.springframework.web.filter.OncePerRequestFilter;
 @EnableOAuth2Sso
 public class SsoApplication {
 
+	@Autowired
+	private OAuth2RestOperations restOperations;
+
 	@RequestMapping("/message")
-	public Map<String, Object> dashboard() {
-		return Collections.<String, Object> singletonMap("message", "Yay!");
+	public Map<String, Object> dashboard(Principal user) {
+		OIDCAuthentication authentication = (OIDCAuthentication) ((OAuth2Authentication) user).getUserAuthentication();
+
+		@SuppressWarnings("unchecked")
+		Map<String, ?> details = (Map<String, ?>) authentication.getDetails();
+		return Collections.<String, Object> singletonMap("message", restOperations
+				.getForObject("https://fhir-api.smarthealthit.org/Patient/" + details.get("patient"), String.class));
 	}
 
 	@RequestMapping("/user")
@@ -49,18 +65,17 @@ public class SsoApplication {
 	}
 
 	public static void main(String[] args) {
-		StandardEnvironment environment = new StandardEnvironment();
 		SpringApplication.run(SsoApplication.class, args);
 	}
-	
+
 	@Controller
 	public static class LoginErrors {
-		
+
 		@RequestMapping("/dashboard/login")
 		public String dashboard() {
 			return "redirect:/#/";
 		}
-		
+
 	}
 
 	@Component
@@ -73,8 +88,7 @@ public class SsoApplication {
 
 		@Override
 		public void configure(HttpSecurity http) throws Exception {
-			http.antMatcher("/dashboard/**").authorizeRequests().anyRequest()
-					.authenticated().and().csrf()
+			http.antMatcher("/dashboard/**").authorizeRequests().anyRequest().authenticated().and().csrf()
 					.csrfTokenRepository(csrfTokenRepository()).and()
 					.addFilterAfter(csrfHeaderFilter(), CsrfFilter.class);
 		}
@@ -82,11 +96,9 @@ public class SsoApplication {
 		private Filter csrfHeaderFilter() {
 			return new OncePerRequestFilter() {
 				@Override
-				protected void doFilterInternal(HttpServletRequest request,
-						HttpServletResponse response, FilterChain filterChain)
-						throws ServletException, IOException {
-					CsrfToken csrf = (CsrfToken) request.getAttribute(CsrfToken.class
-							.getName());
+				protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
+						FilterChain filterChain) throws ServletException, IOException {
+					CsrfToken csrf = (CsrfToken) request.getAttribute(CsrfToken.class.getName());
 					if (csrf != null) {
 						Cookie cookie = new Cookie("XSRF-TOKEN", csrf.getToken());
 						cookie.setPath("/");
@@ -102,5 +114,37 @@ public class SsoApplication {
 			repository.setHeaderName("X-XSRF-TOKEN");
 			return repository;
 		}
+	}
+
+	@Autowired
+	private OAuth2RestOperations oauth2RestOperations;
+
+	@Bean(name = { "userInfoTokenServices", "oidResourceServerTokenServices" })
+	public ResourceServerTokenServices resourceServerTokenServices() {
+		OIDCResourceServerTokenServices tokenServices = new OIDCResourceServerTokenServices();
+		tokenServices.setRestTemplate(oauth2RestOperations);
+		tokenServices.setTokenConverter(tokenConverter());
+		return tokenServices;
+	}
+
+	@Bean
+	public UserAuthenticationConverter userAuthenticationConverter() {
+		OIDUserAuthenticationConverter converter = new OIDUserAuthenticationConverter();
+		converter.setOIDCOperations(oidcOperations());
+		return converter;
+	}
+
+	@Bean
+	public OIDCOperations oidcOperations() {
+		OIDCOperations operations = new OIDCOperations();
+		operations.setOAuth2RestOperations(oauth2RestOperations);
+		return operations;
+	}
+
+	@Bean
+	public AccessTokenConverter tokenConverter() {
+		OIDCAccessTokenConverter tokenConverter = new OIDCAccessTokenConverter();
+		tokenConverter.setUserAuthenticationConverter(userAuthenticationConverter());
+		return tokenConverter;
 	}
 }
